@@ -5,51 +5,61 @@ from googleapiclient.discovery import build
 from googleapiclient.http import MediaIoBaseUpload
 
 app = Flask(__name__)
+
 SCOPES = ["https://www.googleapis.com/auth/drive.file"]
 
 def get_drive_service():
     token_json = os.environ.get("GOOGLE_TOKEN_JSON")
     if not token_json:
-        raise RuntimeError("GOOGLE_TOKEN_JSON missing")
+        return None
 
     creds_info = json.loads(token_json)
     creds = Credentials.from_authorized_user_info(creds_info, SCOPES)
     return build("drive", "v3", credentials=creds)
 
+
 @app.route("/", methods=["GET"])
 def home():
-    return "Server is running!"
+    return "Server is running successfully!"
+
 
 @app.route("/upload", methods=["POST"])
-def upload():
-    data = request.get_json(force=True)
-    url = data.get("url")
+def upload_file():
+    try:
+        data = request.get_json()
+        url = data.get("url")
+        if not url:
+            return jsonify({"error": "URL missing"}), 400
 
-    if not url:
-        return jsonify({"error": "URL missing"}), 400
+        # Download file from URL
+        file_data = requests.get(url, stream=True)
+        if file_data.status_code != 200:
+            return jsonify({"error": "Failed to download file"}), 400
 
-    file_data = requests.get(url)
-    if file_data.status_code != 200:
-        return jsonify({"error": "Download failed"}), 400
+        filename = url.split("/")[-1] or "file.bin"
+        file_bytes = io.BytesIO(file_data.content)
 
-    filename = url.split("/")[-1] or "file"
-    content = io.BytesIO(file_data.content)
+        service = get_drive_service()
+        if service is None:
+            return jsonify({"error": "Google token missing"}), 500
 
-    drive = get_drive_service()
-    media = MediaIoBaseUpload(content, mimetype="application/octet-stream", resumable=True)
+        media = MediaIoBaseUpload(file_bytes, mimetype="application/octet-stream", resumable=True)
+        uploaded = service.files().create(
+            media_body=media,
+            body={"name": filename},
+            fields="id"
+        ).execute()
 
-    uploaded = drive.files().create(
-        body={"name": filename},
-        media_body=media,
-        fields="id"
-    ).execute()
+        return jsonify({
+            "status": "success",
+            "file": filename,
+            "drive_link": f"https://drive.google.com/file/d/{uploaded['id']}/view"
+        })
 
-    file_id = uploaded.get("id")
-    return jsonify({
-        "status": "success",
-        "drive_link": f"https://drive.google.com/file/d/{file_id}/view"
-    })
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
 
 if __name__ == "__main__":
-    port = int(os.environ["PORT"])   # <-- 100% required for Railway
+    port = int(os.environ.get("PORT", 8080))
     app.run(host="0.0.0.0", port=port)
